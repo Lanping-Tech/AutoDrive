@@ -281,5 +281,6 @@ with open(os.path.join(args.logdir, 'args.txt'), 'w') as f:
 for epoch in range(trainer.cur_epoch, args.epochs): 
 	trainer.train()
 	if epoch % args.val_every == 0: 
+		print(epoch)
 		trainer.validate()
 		trainer.save()

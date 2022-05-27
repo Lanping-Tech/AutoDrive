@@ -94,7 +94,7 @@ class Block(nn.Module):
         left = left + self.mlp_left(left)
 
         # right block
-        right = torch.cat([x[:,:T//2, :], x[:, T//2:, :]], dim=1)
+        right = torch.cat([x[:, T//2:, :], x[:,:T//2, :]], dim=1)
         right = x[:, T//2:, :]  + self.attn_right(self.ln1_right(right))
         right = right + self.mlp_right(right)
 
