@@ -129,4 +129,4 @@ dmypy.json
 .pyre/
 
 */log/*
-transfuser-z/log.zip
+*/log.zip

@@ -376,7 +376,7 @@ class PIDController(object):
         return self._K_P * error + self._K_I * integral + self._K_D * derivative
 
 
-class TransFuserZ(nn.Module):
+class TransFuserCross(nn.Module):
     '''
     Transformer-based feature fusion followed by GRU-based waypoint prediction network and PID controller
     '''
