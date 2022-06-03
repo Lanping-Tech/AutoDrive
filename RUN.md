@@ -26,6 +26,8 @@ mkdir ./model_ckpt/transfuser_newfusion
 cp /content/drive/MyDrive/Auto-Drive/transfuser-newfusion/log/transfuser-newfusion/best_model.pth ./model_ckpt/transfuser_newfusion/best_model.pth
 mkdir ./model_ckpt/transfuser_convnext
 cp /content/drive/MyDrive/Auto-Drive/transfuser-convnext/log/transfuser-convnext/best_model.pth ./model_ckpt/transfuser_convnext/best_model.pth
+mkdir ./model_ckpt/transfuser_cross
+cp /content/drive/MyDrive/Auto-Drive/transfuser-z/log/transfuser-z/best_model.pth ./model_ckpt/transfuser_cross/best_model.pth
 ```
 ## 5. 给colab用户加777权限
 ```bash
