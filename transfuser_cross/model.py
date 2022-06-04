@@ -497,3 +497,4 @@ if __name__ == '__main__':
     flops, params = profile(model, (rgb, lidar, torch.randn(1, 2), torch.randn(1)))
     print('flops: ', flops, 'params: ', params)
     print('flops: %.2f M, params: %.2f M' % (flops / 1000000.0, params / 1000000.0))
+    print(model)
