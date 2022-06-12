@@ -545,7 +545,7 @@ if __name__ == '__main__':
     config = GlobalConfig()
     rgb = [torch.randn(1, 3, 256, 256)]
     lidar = [torch.randn(1, 2, 256, 256)]
-    model = TransFuser(config, torch.device('cpu'))
+    model = TransFuserPatch(config, torch.device('cpu'))
     flops, params = profile(model, (rgb, lidar, torch.randn(1, 2), torch.randn(1)))
     print('flops: ', flops, 'params: ', params)
     print('flops: %.2f M, params: %.2f M' % (flops / 1000000.0, params / 1000000.0))

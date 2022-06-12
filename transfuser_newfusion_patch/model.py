@@ -554,22 +554,22 @@ class TransFuserNewFusionPatch(nn.Module):
 
         return steer, throttle, brake, metadata
 
-from config import GlobalConfig
-config = GlobalConfig()
-rgb = [torch.randn(1, 3, 256, 256)]
-lidar = [torch.randn(1, 2, 256, 256)]
-model = TransFuserNewFusionPatch(config, torch.device('cpu'))
-y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
-print(y.shape)
+# from config import GlobalConfig
+# config = GlobalConfig()
+# rgb = [torch.randn(1, 3, 256, 256)]
+# lidar = [torch.randn(1, 2, 256, 256)]
+# model = TransFuserNewFusionPatch(config, torch.device('cpu'))
+# y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
+# print(y.shape)
 
-# if __name__ == '__main__':
-#     from config import GlobalConfig
-#     from thop import profile
-#     config = GlobalConfig()
-#     rgb = [torch.randn(1, 3, 256, 256)]
-#     lidar = [torch.randn(1, 2, 256, 256)]
-#     model = TransFuserNewFusionPatch(config, torch.device('cpu'))
-#     flops, params = profile(model, (rgb, lidar, torch.randn(1, 2), torch.randn(1)))
-#     print('flops: ', flops, 'params: ', params)
-#     print('flops: %.2f M, params: %.2f M' % (flops / 1000000.0, params / 1000000.0))
-#     print(model)
+if __name__ == '__main__':
+    from config import GlobalConfig
+    from thop import profile
+    config = GlobalConfig()
+    rgb = [torch.randn(1, 3, 256, 256)]
+    lidar = [torch.randn(1, 2, 256, 256)]
+    model = TransFuserNewFusionPatch(config, torch.device('cpu'))
+    flops, params = profile(model, (rgb, lidar, torch.randn(1, 2), torch.randn(1)))
+    print('flops: ', flops, 'params: ', params)
+    print('flops: %.2f M, params: %.2f M' % (flops / 1000000.0, params / 1000000.0))
+    print(model)
