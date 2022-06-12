@@ -248,17 +248,17 @@ class GPT(nn.Module):
         h, w = lidar_tensor.shape[2:4]
         
         # forward the image model for token embeddings
-        print("image_tensor.shape: ", image_tensor.shape)
-        print("lidar_tensor.shape: ", lidar_tensor.shape)
+        # print("image_tensor.shape: ", image_tensor.shape)
+        # print("lidar_tensor.shape: ", lidar_tensor.shape)
         image_tensor = image_tensor.view(bz, self.config.n_views * self.seq_len, -1, h, w)
         lidar_tensor = lidar_tensor.view(bz, self.seq_len, -1, h, w)
 
         # pad token embeddings along number of tokens dimension
         token_embeddings = torch.cat([image_tensor, lidar_tensor], dim=1).permute(0,1,3,4,2).contiguous()
-        print(token_embeddings.shape)
+        # print(token_embeddings.shape)
         token_embeddings = self.to_patch_embedding(token_embeddings)
-        print(token_embeddings.shape)
-        print()
+        # print(token_embeddings.shape)
+        # print()
 
         # project velocity to n_embed
         velocity_embeddings = self.vel_emb(velocity.unsqueeze(1)) # (B, C)
