@@ -89,20 +89,18 @@ class SelfAttention(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size()
-        left = x[:, :T//2, :]
-        right = x[:, T//2:, :]
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        k = self.key(right).view(B, T//2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = self.query(left).view(B, T//2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = self.value(right).view(B, T//2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        k = self.key(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = self.value(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         # self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = F.softmax(att, dim=-1)
         att = self.attn_drop(att)
         y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T//2, C) # re-assemble all head outputs side by side
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_drop(self.proj(y))
@@ -114,19 +112,10 @@ class Block(nn.Module):
 
     def __init__(self, n_embd, n_head, block_exp, attn_pdrop, resid_pdrop):
         super().__init__()
-        self.ln1_left = nn.LayerNorm(n_embd)
-        self.ln2_left = nn.LayerNorm(n_embd)
-        self.attn_left = SelfAttention(n_embd, n_head, attn_pdrop, resid_pdrop)
-        self.mlp_left = nn.Sequential(
-            nn.Linear(n_embd, block_exp * n_embd),
-            nn.ReLU(True), # changed from GELU
-            nn.Linear(block_exp * n_embd, n_embd),
-            nn.Dropout(resid_pdrop),
-        )
-        self.ln1_right = nn.LayerNorm(n_embd)
-        self.ln2_right = nn.LayerNorm(n_embd)
-        self.attn_right = SelfAttention(n_embd, n_head, attn_pdrop, resid_pdrop)
-        self.mlp_right = nn.Sequential(
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+        self.attn = SelfAttention(n_embd, n_head, attn_pdrop, resid_pdrop)
+        self.mlp = nn.Sequential(
             nn.Linear(n_embd, block_exp * n_embd),
             nn.ReLU(True), # changed from GELU
             nn.Linear(block_exp * n_embd, n_embd),
@@ -136,19 +125,10 @@ class Block(nn.Module):
     def forward(self, x):
         B, T, C = x.size()
 
-        # left block
-        left = x[:,:T//2, :] + self.attn_left(self.ln1_left(x))
-        left = left + self.mlp_left(left)
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
 
-        # right block
-        right = torch.cat([x[:, T//2:, :], x[:,:T//2, :]], dim=1)
-        right = x[:, T//2:, :]  + self.attn_right(self.ln1_right(right))
-        right = right + self.mlp_right(right)
-
-        # concatenate
-        out = torch.cat([left, right], dim=1)
-
-        return out
+        return x
 
 
 class GPT(nn.Module):
@@ -156,7 +136,7 @@ class GPT(nn.Module):
 
     def __init__(self, n_embd, n_head, block_exp, n_layer, 
                     vert_anchors, horz_anchors, seq_len, 
-                    embd_pdrop, attn_pdrop, resid_pdrop, config):
+                    embd_pdrop, attn_pdrop, resid_pdrop, config, patch_exp, patch_dim=512):
         super().__init__()
         self.n_embd = n_embd
         self.seq_len = seq_len
@@ -164,20 +144,28 @@ class GPT(nn.Module):
         self.horz_anchors = horz_anchors
         self.config = config
 
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b t (h p1) (w p2) c -> b (t h w) (p1 p2 c)', h = vert_anchors, w = horz_anchors),
+            nn.Linear(patch_exp * patch_exp * n_embd, patch_dim),
+        )
+
         # positional embedding parameter (learnable), image + lidar
-        self.pos_emb = nn.Parameter(torch.zeros(1, (self.config.n_views + 1) * seq_len * vert_anchors * horz_anchors, n_embd))
+        self.pos_emb = nn.Parameter(torch.zeros(1, (self.config.n_views + 1) * seq_len * vert_anchors * horz_anchors, patch_dim))
         
         # velocity embedding
-        self.vel_emb = nn.Linear(1, n_embd)
+        self.vel_emb = nn.Linear(1, patch_dim)
         self.drop = nn.Dropout(embd_pdrop)
 
         # transformer
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head, 
+        self.blocks = nn.Sequential(*[Block(patch_dim, n_head, 
                         block_exp, attn_pdrop, resid_pdrop)
                         for layer in range(n_layer)])
         
         # decoder head
-        self.ln_f = nn.LayerNorm(n_embd)
+        self.linear_out = nn.Linear(patch_dim, patch_exp * patch_dim)
+        self.ln_f = nn.LayerNorm(patch_exp * patch_dim)
+        self.to_out = Rearrange('b (t h w) (p1 p2 c) -> b t (h p1) (w p2) c', h = vert_anchors, w = horz_anchors, p1=patch_exp, p2=patch_exp)
+
 
         self.block_size = seq_len
         self.apply(self._init_weights)
@@ -238,12 +226,17 @@ class GPT(nn.Module):
         h, w = lidar_tensor.shape[2:4]
         
         # forward the image model for token embeddings
+        print("image_tensor.shape: ", image_tensor.shape)
+        print("lidar_tensor.shape: ", lidar_tensor.shape)
         image_tensor = image_tensor.view(bz, self.config.n_views * self.seq_len, -1, h, w)
         lidar_tensor = lidar_tensor.view(bz, self.seq_len, -1, h, w)
 
         # pad token embeddings along number of tokens dimension
         token_embeddings = torch.cat([image_tensor, lidar_tensor], dim=1).permute(0,1,3,4,2).contiguous()
-        token_embeddings = token_embeddings.view(bz, -1, self.n_embd) # (B, an * T, C)
+        print(token_embeddings.shape)
+        token_embeddings = self.to_patch_embedding(token_embeddings)
+        print(token_embeddings.shape)
+        print()
 
         # project velocity to n_embed
         velocity_embeddings = self.vel_emb(velocity.unsqueeze(1)) # (B, C)
@@ -252,8 +245,10 @@ class GPT(nn.Module):
         x = self.drop(self.pos_emb + token_embeddings + velocity_embeddings.unsqueeze(1)) # (B, an * T, C)
         # x = self.drop(token_embeddings + velocity_embeddings.unsqueeze(1)) # (B, an * T, C)
         x = self.blocks(x) # (B, an * T, C)
+        x = self.linear_out(x)
         x = self.ln_f(x) # (B, an * T, C)
-        x = x.view(bz, (self.config.n_views + 1) * self.seq_len, self.vert_anchors, self.horz_anchors, self.n_embd)
+        # x = x.view(bz, (self.config.n_views + 1) * self.seq_len, self.vert_anchors, self.horz_anchors, self.n_embd)
+        x = self.to_out(x) 
         x = x.permute(0,1,4,2,3).contiguous() # same as token_embeddings
 
         image_tensor_out = x[:, :self.config.n_views*self.seq_len, :, :, :].contiguous().view(bz * self.config.n_views * self.seq_len, -1, h, w)
@@ -288,7 +283,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            patch_exp=8)
         self.transformer2 = GPT(n_embd=128,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -299,7 +295,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            patch_exp=4)
         self.transformer3 = GPT(n_embd=256,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -310,7 +307,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            patch_exp=2)
         self.transformer4 = GPT(n_embd=512,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -321,7 +319,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            patch_exp=1)
 
         
     def forward(self, image_list, lidar_list, velocity):
@@ -355,42 +354,42 @@ class Encoder(nn.Module):
         image_features = self.image_encoder.features.layer1(image_features)
         lidar_features = self.lidar_encoder._model.layer1(lidar_features)
         # fusion at (B, 64, 64, 64)
-        image_embd_layer1 = self.avgpool(image_features)
-        lidar_embd_layer1 = self.avgpool(lidar_features)
-        image_features_layer1, lidar_features_layer1 = self.transformer1(image_embd_layer1, lidar_embd_layer1, velocity)
-        image_features_layer1 = F.interpolate(image_features_layer1, scale_factor=8, mode='bilinear')
-        lidar_features_layer1 = F.interpolate(lidar_features_layer1, scale_factor=8, mode='bilinear')
+        # image_embd_layer1 = self.avgpool(image_features)
+        # lidar_embd_layer1 = self.avgpool(lidar_features)
+        image_features_layer1, lidar_features_layer1 = self.transformer1(image_features, lidar_features, velocity)
+        # image_features_layer1 = F.interpolate(image_features_layer1, scale_factor=8, mode='bilinear')
+        # lidar_features_layer1 = F.interpolate(lidar_features_layer1, scale_factor=8, mode='bilinear')
         image_features = image_features + image_features_layer1
         lidar_features = lidar_features + lidar_features_layer1
 
         image_features = self.image_encoder.features.layer2(image_features)
         lidar_features = self.lidar_encoder._model.layer2(lidar_features)
         # fusion at (B, 128, 32, 32)
-        image_embd_layer2 = self.avgpool(image_features)
-        lidar_embd_layer2 = self.avgpool(lidar_features)
-        image_features_layer2, lidar_features_layer2 = self.transformer2(image_embd_layer2, lidar_embd_layer2, velocity)
-        image_features_layer2 = F.interpolate(image_features_layer2, scale_factor=4, mode='bilinear')
-        lidar_features_layer2 = F.interpolate(lidar_features_layer2, scale_factor=4, mode='bilinear')
+        # image_embd_layer2 = self.avgpool(image_features)
+        # lidar_embd_layer2 = self.avgpool(lidar_features)
+        image_features_layer2, lidar_features_layer2 = self.transformer2(image_features, lidar_features, velocity)
+        # image_features_layer2 = F.interpolate(image_features_layer2, scale_factor=4, mode='bilinear')
+        # lidar_features_layer2 = F.interpolate(lidar_features_layer2, scale_factor=4, mode='bilinear')
         image_features = image_features + image_features_layer2
         lidar_features = lidar_features + lidar_features_layer2
 
         image_features = self.image_encoder.features.layer3(image_features)
         lidar_features = self.lidar_encoder._model.layer3(lidar_features)
         # fusion at (B, 256, 16, 16)
-        image_embd_layer3 = self.avgpool(image_features)
-        lidar_embd_layer3 = self.avgpool(lidar_features)
-        image_features_layer3, lidar_features_layer3 = self.transformer3(image_embd_layer3, lidar_embd_layer3, velocity)
-        image_features_layer3 = F.interpolate(image_features_layer3, scale_factor=2, mode='bilinear')
-        lidar_features_layer3 = F.interpolate(lidar_features_layer3, scale_factor=2, mode='bilinear')
+        # image_embd_layer3 = self.avgpool(image_features)
+        # lidar_embd_layer3 = self.avgpool(lidar_features)
+        image_features_layer3, lidar_features_layer3 = self.transformer3(image_features, lidar_features, velocity)
+        # image_features_layer3 = F.interpolate(image_features_layer3, scale_factor=2, mode='bilinear')
+        # lidar_features_layer3 = F.interpolate(lidar_features_layer3, scale_factor=2, mode='bilinear')
         image_features = image_features + image_features_layer3
         lidar_features = lidar_features + lidar_features_layer3
 
         image_features = self.image_encoder.features.layer4(image_features)
         lidar_features = self.lidar_encoder._model.layer4(lidar_features)
         # fusion at (B, 512, 8, 8)
-        image_embd_layer4 = self.avgpool(image_features)
-        lidar_embd_layer4 = self.avgpool(lidar_features)
-        image_features_layer4, lidar_features_layer4 = self.transformer4(image_embd_layer4, lidar_embd_layer4, velocity)
+        # image_embd_layer4 = self.avgpool(image_features)
+        # lidar_embd_layer4 = self.avgpool(lidar_features)
+        image_features_layer4, lidar_features_layer4 = self.transformer4(image_features, lidar_features, velocity)
         image_features = image_features + image_features_layer4
         lidar_features = lidar_features + lidar_features_layer4
 
@@ -405,7 +404,6 @@ class Encoder(nn.Module):
         fused_features = torch.sum(fused_features, dim=1)
 
         return fused_features
-
 
 class PIDController(object):
     def __init__(self, K_P=1.0, K_I=0.0, K_D=0.0, n=20):
@@ -432,7 +430,7 @@ class PIDController(object):
         return self._K_P * error + self._K_I * integral + self._K_D * derivative
 
 
-class TransFuserNewFusion(nn.Module):
+class TransFuserPatch(nn.Module):
     '''
     Transformer-based feature fusion followed by GRU-based waypoint prediction network and PID controller
     '''
@@ -537,7 +535,7 @@ class TransFuserNewFusion(nn.Module):
 # config = GlobalConfig()
 # rgb = [torch.randn(1, 3, 256, 256)]
 # lidar = [torch.randn(1, 2, 256, 256)]
-# model = TransFuserNewFusion(config, torch.device('cpu'))
+# model = TransFuser(config, torch.device('cpu'))
 # y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
 # print(y.shape)
 
@@ -547,8 +545,11 @@ if __name__ == '__main__':
     config = GlobalConfig()
     rgb = [torch.randn(1, 3, 256, 256)]
     lidar = [torch.randn(1, 2, 256, 256)]
-    model = TransFuserNewFusion(config, torch.device('cpu'))
+    model = TransFuser(config, torch.device('cpu'))
     flops, params = profile(model, (rgb, lidar, torch.randn(1, 2), torch.randn(1)))
     print('flops: ', flops, 'params: ', params)
     print('flops: %.2f M, params: %.2f M' % (flops / 1000000.0, params / 1000000.0))
     print(model)
+
+
+
