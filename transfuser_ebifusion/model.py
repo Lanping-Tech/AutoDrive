@@ -29,8 +29,8 @@ class EBiFusion_block(nn.Module):
         self.lidar_sigmoid = nn.Sigmoid()
 
         # bi-linear modelling for both
-        self.W_g = Conv(ch_1, ch_int, 1, bn=True, relu=False)
-        self.W_x = Conv(ch_2, ch_int, 1, bn=True, relu=False)
+        self.W_rgb = Conv(ch_1, ch_int, 1, bn=True, relu=False)
+        self.W_lidar = Conv(ch_2, ch_int, 1, bn=True, relu=False)
         self.W = Conv(ch_int, ch_int, 3, bn=True, relu=True)
 
         self.relu = nn.ReLU(inplace=True)
@@ -41,26 +41,30 @@ class EBiFusion_block(nn.Module):
         self.drop_rate = drop_rate
 
         
-    def forward(self, g, x):
+    def forward(self, rgb, lidar):
         # bilinear pooling
-        W_g = self.W_g(g)
-        W_x = self.W_x(x)
-        bp = self.W(W_g*W_x)
+        W_rgb = self.W_rgb(rgb)
+        W_lidar = self.W_lidar(lidar)
+        bp = self.W(W_rgb*W_lidar)
 
         # spatial attention for cnn branch
-        g_in = g
-        g = self.compress(g)
-        g = self.spatial(g)
-        g = self.sigmoid(g) * g_in
+        rgb_in = rgb
+        rgb = rgb.mean((2, 3), keepdim=True)
+        rgb = self.rgb_fc1(rgb)
+        rgb = self.rgb_relu(rgb)
+        rgb = self.rgb_fc2(rgb)
+        rgb = self.rgb_sigmoid(rgb) * rgb_in
 
-        # channel attetion for transformer branch
-        x_in = x
-        x = x.mean((2, 3), keepdim=True)
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        x = self.sigmoid(x) * x_in
-        fuse = self.residual(torch.cat([g, x, bp], 1))
+        # channel attention for cnn branch
+        lidar_in = lidar
+        lidar = lidar.mean((2, 3), keepdim=True)
+        lidar = self.lidar_fc1(lidar)
+        lidar = self.lidar_relu(lidar)
+        lidar = self.lidar_fc2(lidar)
+        lidar = self.lidar_sigmoid(lidar) * lidar_in
+
+        # fusion
+        fuse = self.residual(torch.cat([rgb, lidar, bp], 1))
 
         if self.drop_rate > 0:
             return self.dropout(fuse)
@@ -259,7 +263,7 @@ class GPT(nn.Module):
         self.horz_anchors = horz_anchors
         self.config = config
 
-        self.bifusion = BiFusion_block(ch_1=n_embd, ch_2=n_embd, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
+        self.bifusion = EBiFusion_block(ch_1=n_embd, ch_2=n_embd, r_1=n_embd//64, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
 
         # positional embedding parameter (learnable), image + lidar
         self.pos_emb = nn.Parameter(torch.zeros(1, seq_len * vert_anchors * horz_anchors, n_embd))
@@ -532,7 +536,7 @@ class PIDController(object):
         return self._K_P * error + self._K_I * integral + self._K_D * derivative
 
 
-class TransFuserBiFusion(nn.Module):
+class TransFuserEBiFusion(nn.Module):
     '''
     Transformer-based feature fusion followed by GRU-based waypoint prediction network and PID controller
     '''
@@ -633,13 +637,13 @@ class TransFuserBiFusion(nn.Module):
 
         return steer, throttle, brake, metadata
 
-# from config import GlobalConfig
-# config = GlobalConfig()
-# rgb = [torch.randn(1, 3, 256, 256)]
-# lidar = [torch.randn(1, 2, 256, 256)]
-# model = TransFuserBiFusion(config, torch.device('cpu'))
-# y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
-# print(y.shape)
+from config import GlobalConfig
+config = GlobalConfig()
+rgb = [torch.randn(1, 3, 256, 256)]
+lidar = [torch.randn(1, 2, 256, 256)]
+model = TransFuserEBiFusion(config, torch.device('cpu'))
+y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
+print(y.shape)
 
 # if __name__ == '__main__':
 #     from config import GlobalConfig

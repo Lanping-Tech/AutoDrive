@@ -12,7 +12,7 @@ import torch.nn.functional as F
 torch.backends.cudnn.benchmark = True
 
 from config import GlobalConfig
-from model import TransFuserBiFusion
+from model import TransFuserEBiFusion
 from data import CARLA_Data
 
 from sklearn.metrics import r2_score, mean_squared_error
@@ -20,7 +20,7 @@ from sklearn.metrics import r2_score, mean_squared_error
 torch.cuda.empty_cache()
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--id', type=str, default='transfuser_bifusion', help='Unique experiment identifier.')
+parser.add_argument('--id', type=str, default='transfuser_ebifusion', help='Unique experiment identifier.')
 parser.add_argument('--device', type=str, default='cuda', help='Device to use')
 parser.add_argument('--epochs', type=int, default=101, help='Number of train epochs.')
 parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate.')
@@ -246,7 +246,7 @@ dataloader_train = DataLoader(train_set, batch_size=args.batch_size, shuffle=Tru
 dataloader_val = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True)
 
 # Model
-model = TransFuserBiFusion(config, args.device)
+model = TransFuserEBiFusion(config, args.device)
 optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 trainer = Engine()
 
