@@ -12,19 +12,21 @@ class ChannelPool(nn.Module):
         return torch.cat( (torch.max(x,1)[0].unsqueeze(1), torch.mean(x,1).unsqueeze(1)), dim=1)
 
 
-class BiFusion_block(nn.Module):
-    def __init__(self, ch_1, ch_2, r_2, ch_int, ch_out, drop_rate=0.):
-        super(BiFusion_block, self).__init__()
+class EBiFusion_block(nn.Module):
+    def __init__(self, ch_1, ch_2, r_1, r_2, ch_int, ch_out, drop_rate=0.):
+        super(EBiFusion_block, self).__init__()
 
         # channel attention for F_g, use SE Block
-        self.fc1 = nn.Conv2d(ch_2, ch_2 // r_2, kernel_size=1)
-        self.relu = nn.ReLU(inplace=True)
-        self.fc2 = nn.Conv2d(ch_2 // r_2, ch_2, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
+        self.rgb_fc1 = nn.Conv2d(ch_1, ch_1 // r_1, kernel_size=1)
+        self.rgb_relu = nn.ReLU(inplace=True)
+        self.rgb_fc2 = nn.Conv2d(ch_1 // r_1, ch_1, kernel_size=1)
+        self.rgb_sigmoid = nn.Sigmoid()
 
         # spatial attention for F_l
-        self.compress = ChannelPool()
-        self.spatial = Conv(2, 1, 7, bn=True, relu=False, bias=False)
+        self.lidar_fc1 = nn.Conv2d(ch_2, ch_2 // r_2, kernel_size=1)
+        self.lidar_relu = nn.ReLU(inplace=True)
+        self.lidar_fc2 = nn.Conv2d(ch_2 // r_2, ch_2, kernel_size=1)
+        self.lidar_sigmoid = nn.Sigmoid()
 
         # bi-linear modelling for both
         self.W_g = Conv(ch_1, ch_int, 1, bn=True, relu=False)
@@ -336,7 +338,7 @@ class GPT(nn.Module):
         image_tensor = image_tensor.view(bz, -1, h, w)
         lidar_tensor = lidar_tensor.view(bz, -1, h, w)
 
-        token_embeddings = self.bifusion(lidar_tensor, image_tensor)
+        token_embeddings = self.bifusion(image_tensor, lidar_tensor)
         token_embeddings = token_embeddings.view(bz, -1, self.n_embd)
 
         # pad token embeddings along number of tokens dimension
