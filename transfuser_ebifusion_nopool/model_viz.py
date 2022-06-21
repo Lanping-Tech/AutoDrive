@@ -7,125 +7,6 @@ from torch import nn
 import torch.nn.functional as F
 from torchvision import models
 
-class ChannelPool(nn.Module):
-    def forward(self, x):
-        return torch.cat( (torch.max(x,1)[0].unsqueeze(1), torch.mean(x,1).unsqueeze(1)), dim=1)
-
-
-class EBiFusion_block(nn.Module):
-    def __init__(self, ch_1, ch_2, r_1, r_2, ch_int, ch_out, drop_rate=0.):
-        super(EBiFusion_block, self).__init__()
-
-        # channel attention for F_g, use SE Block
-        self.rgb_fc1 = nn.Conv2d(ch_1, ch_1 // r_1, kernel_size=1)
-        self.rgb_relu = nn.ReLU(inplace=True)
-        self.rgb_fc2 = nn.Conv2d(ch_1 // r_1, ch_1, kernel_size=1)
-        self.rgb_sigmoid = nn.Sigmoid()
-
-        # spatial attention for F_l
-        self.lidar_fc1 = nn.Conv2d(ch_2, ch_2 // r_2, kernel_size=1)
-        self.lidar_relu = nn.ReLU(inplace=True)
-        self.lidar_fc2 = nn.Conv2d(ch_2 // r_2, ch_2, kernel_size=1)
-        self.lidar_sigmoid = nn.Sigmoid()
-
-        # bi-linear modelling for both
-        self.W_rgb = Conv(ch_1, ch_int, 1, bn=True, relu=False)
-        self.W_lidar = Conv(ch_2, ch_int, 1, bn=True, relu=False)
-        self.W = Conv(ch_int, ch_int, 3, bn=True, relu=True)
-
-        self.relu = nn.ReLU(inplace=True)
-
-        self.residual = Residual(ch_1+ch_2+ch_int, ch_out)
-
-        self.dropout = nn.Dropout2d(drop_rate)
-        self.drop_rate = drop_rate
-
-        
-    def forward(self, rgb, lidar):
-        # bilinear pooling
-        W_rgb = self.W_rgb(rgb)
-        W_lidar = self.W_lidar(lidar)
-        bp = self.W(W_rgb*W_lidar)
-
-        # spatial attention for cnn branch
-        rgb_in = rgb
-        rgb = rgb.mean((2, 3), keepdim=True)
-        rgb = self.rgb_fc1(rgb)
-        rgb = self.rgb_relu(rgb)
-        rgb = self.rgb_fc2(rgb)
-        rgb = self.rgb_sigmoid(rgb) * rgb_in
-
-        # channel attention for cnn branch
-        lidar_in = lidar
-        lidar = lidar.mean((2, 3), keepdim=True)
-        lidar = self.lidar_fc1(lidar)
-        lidar = self.lidar_relu(lidar)
-        lidar = self.lidar_fc2(lidar)
-        lidar = self.lidar_sigmoid(lidar) * lidar_in
-
-        # fusion
-        fuse = self.residual(torch.cat([rgb, lidar, bp], 1))
-
-        if self.drop_rate > 0:
-            return self.dropout(fuse)
-        else:
-            return fuse
-
-class Residual(nn.Module):
-    def __init__(self, inp_dim, out_dim):
-        super(Residual, self).__init__()
-        self.relu = nn.ReLU(inplace=True)
-        self.bn1 = nn.BatchNorm2d(inp_dim)
-        self.conv1 = Conv(inp_dim, int(out_dim/2), 1, relu=False)
-        self.bn2 = nn.BatchNorm2d(int(out_dim/2))
-        self.conv2 = Conv(int(out_dim/2), int(out_dim/2), 3, relu=False)
-        self.bn3 = nn.BatchNorm2d(int(out_dim/2))
-        self.conv3 = Conv(int(out_dim/2), out_dim, 1, relu=False)
-        self.skip_layer = Conv(inp_dim, out_dim, 1, relu=False)
-        if inp_dim == out_dim:
-            self.need_skip = False
-        else:
-            self.need_skip = True
-        
-    def forward(self, x):
-        if self.need_skip:
-            residual = self.skip_layer(x)
-        else:
-            residual = x
-        out = self.bn1(x)
-        out = self.relu(out)
-        out = self.conv1(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.bn3(out)
-        out = self.relu(out)
-        out = self.conv3(out)
-        out += residual
-        return out 
-
-
-class Conv(nn.Module):
-    def __init__(self, inp_dim, out_dim, kernel_size=3, stride=1, bn=False, relu=True, bias=True):
-        super(Conv, self).__init__()
-        self.inp_dim = inp_dim
-        self.conv = nn.Conv2d(inp_dim, out_dim, kernel_size, stride, padding=(kernel_size-1)//2, bias=bias)
-        self.relu = None
-        self.bn = None
-        if relu:
-            self.relu = nn.ReLU(inplace=True)
-        if bn:
-            self.bn = nn.BatchNorm2d(out_dim)
-
-    def forward(self, x):
-        assert x.size()[1] == self.inp_dim, "{} {}".format(x.size()[1], self.inp_dim)
-        x = self.conv(x)
-        if self.bn is not None:
-            x = self.bn(x)
-        if self.relu is not None:
-            x = self.relu(x)
-        return x
-
 
 class ImageCNN(nn.Module):
     """ 
@@ -223,7 +104,7 @@ class SelfAttention(nn.Module):
 
         # output projection
         y = self.resid_drop(self.proj(y))
-        return y
+        return y, att
 
 
 class Block(nn.Module):
@@ -241,13 +122,15 @@ class Block(nn.Module):
             nn.Dropout(resid_pdrop),
         )
 
-    def forward(self, x):
+    def forward(self, in_tuple):
+        x, _ = in_tuple
         B, T, C = x.size()
 
-        x = x + self.attn(self.ln1(x))
+        x_up, att = self.attn(self.ln1(x))
+        x = x + x_up
         x = x + self.mlp(self.ln2(x))
 
-        return x
+        return (x, att)
 
 
 class GPT(nn.Module):
@@ -263,10 +146,8 @@ class GPT(nn.Module):
         self.horz_anchors = horz_anchors
         self.config = config
 
-        self.ebifusion = EBiFusion_block(ch_1=n_embd, ch_2=n_embd, r_1=n_embd//64, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
-
         # positional embedding parameter (learnable), image + lidar
-        self.pos_emb = nn.Parameter(torch.zeros(1, seq_len * vert_anchors * horz_anchors, n_embd))
+        self.pos_emb = nn.Parameter(torch.zeros(1, (self.config.n_views + 1) * seq_len * vert_anchors * horz_anchors, n_embd))
         
         # velocity embedding
         self.vel_emb = nn.Linear(1, n_embd)
@@ -339,17 +220,12 @@ class GPT(nn.Module):
         h, w = lidar_tensor.shape[2:4]
         
         # forward the image model for token embeddings
-        image_tensor = image_tensor.view(bz, -1, h, w)
-        lidar_tensor = lidar_tensor.view(bz, -1, h, w)
-
-        token_embeddings = self.ebifusion(image_tensor, lidar_tensor)
-        token_embeddings = token_embeddings.view(bz, -1, self.n_embd)
+        image_tensor = image_tensor.view(bz, self.config.n_views * self.seq_len, -1, h, w)
+        lidar_tensor = lidar_tensor.view(bz, self.seq_len, -1, h, w)
 
         # pad token embeddings along number of tokens dimension
-        # token_embeddings = torch.cat([image_tensor, lidar_tensor], dim=1).permute(0,1,3,4,2).contiguous()
-        # token_embeddings = token_embeddings.view(bz, -1, self.n_embd) # (B, an * T, C)
-        # print(token_embeddings.shape)
-        # print()
+        token_embeddings = torch.cat([image_tensor, lidar_tensor], dim=1).permute(0,1,3,4,2).contiguous()
+        token_embeddings = token_embeddings.view(bz, -1, self.n_embd) # (B, an * T, C)
 
         # project velocity to n_embed
         velocity_embeddings = self.vel_emb(velocity.unsqueeze(1)) # (B, C)
@@ -357,24 +233,24 @@ class GPT(nn.Module):
         # add (learnable) positional embedding and velocity embedding for all tokens
         x = self.drop(self.pos_emb + token_embeddings + velocity_embeddings.unsqueeze(1)) # (B, an * T, C)
         # x = self.drop(token_embeddings + velocity_embeddings.unsqueeze(1)) # (B, an * T, C)
-        x = self.blocks(x) # (B, an * T, C)
+        x, attn_map = self.blocks((x, None)) # (B, an * T, C)
         x = self.ln_f(x) # (B, an * T, C)
-        x = x.view(bz, self.seq_len, self.vert_anchors, self.horz_anchors, self.n_embd)
+        x = x.view(bz, (self.config.n_views + 1) * self.seq_len, self.vert_anchors, self.horz_anchors, self.n_embd)
         x = x.permute(0,1,4,2,3).contiguous() # same as token_embeddings
 
-        fusion_tensor_out = x.view(bz * self.config.n_views * self.seq_len, -1, h, w)
-        # lidar_tensor_out = x.view(bz * self.seq_len, -1, h, w)
+        image_tensor_out = x[:, :self.config.n_views*self.seq_len, :, :, :].contiguous().view(bz * self.config.n_views * self.seq_len, -1, h, w)
+        lidar_tensor_out = x[:, self.config.n_views*self.seq_len:, :, :, :].contiguous().view(bz * self.seq_len, -1, h, w)
         
-        return fusion_tensor_out, fusion_tensor_out
+        return image_tensor_out, lidar_tensor_out, attn_map
 
 
 class Encoder(nn.Module):
     """
-    Multi-scale Fusion Transformer for image + LiDAR feature fusion
+    Multi-view Multi-scale Fusion Transformer for image + LiDAR feature fusion
     """
 
-    def __init__(self, config):
-        super().__init__()
+    def __init__(self, config, **kwargs):
+        super(Encoder, self).__init__()
         self.config = config
 
         self.avgpool = nn.AdaptiveAvgPool2d((self.config.vert_anchors, self.config.horz_anchors))
@@ -429,13 +305,6 @@ class Encoder(nn.Module):
 
         
     def forward(self, image_list, lidar_list, velocity):
-        '''
-        Image + LiDAR feature fusion using transformers
-        Args:
-            image_list (list): list of input images
-            lidar_list (list): list of input LiDAR BEV
-            velocity (tensor): input velocity from speedometer
-        '''
         if self.image_encoder.normalize:
             image_list = [normalize_imagenet(image_input) for image_input in image_list]
 
@@ -461,7 +330,7 @@ class Encoder(nn.Module):
         # fusion at (B, 64, 64, 64)
         image_embd_layer1 = self.avgpool(image_features)
         lidar_embd_layer1 = self.avgpool(lidar_features)
-        image_features_layer1, lidar_features_layer1 = self.transformer1(image_embd_layer1, lidar_embd_layer1, velocity)
+        image_features_layer1, lidar_features_layer1, attn_map1 = self.transformer1(image_embd_layer1, lidar_embd_layer1, velocity)
         image_features_layer1 = F.interpolate(image_features_layer1, scale_factor=8, mode='bilinear')
         lidar_features_layer1 = F.interpolate(lidar_features_layer1, scale_factor=8, mode='bilinear')
         image_features = image_features + image_features_layer1
@@ -472,7 +341,7 @@ class Encoder(nn.Module):
         # fusion at (B, 128, 32, 32)
         image_embd_layer2 = self.avgpool(image_features)
         lidar_embd_layer2 = self.avgpool(lidar_features)
-        image_features_layer2, lidar_features_layer2 = self.transformer2(image_embd_layer2, lidar_embd_layer2, velocity)
+        image_features_layer2, lidar_features_layer2, attn_map2 = self.transformer2(image_embd_layer2, lidar_embd_layer2, velocity)
         image_features_layer2 = F.interpolate(image_features_layer2, scale_factor=4, mode='bilinear')
         lidar_features_layer2 = F.interpolate(lidar_features_layer2, scale_factor=4, mode='bilinear')
         image_features = image_features + image_features_layer2
@@ -483,7 +352,7 @@ class Encoder(nn.Module):
         # fusion at (B, 256, 16, 16)
         image_embd_layer3 = self.avgpool(image_features)
         lidar_embd_layer3 = self.avgpool(lidar_features)
-        image_features_layer3, lidar_features_layer3 = self.transformer3(image_embd_layer3, lidar_embd_layer3, velocity)
+        image_features_layer3, lidar_features_layer3, attn_map3 = self.transformer3(image_embd_layer3, lidar_embd_layer3, velocity)
         image_features_layer3 = F.interpolate(image_features_layer3, scale_factor=2, mode='bilinear')
         lidar_features_layer3 = F.interpolate(lidar_features_layer3, scale_factor=2, mode='bilinear')
         image_features = image_features + image_features_layer3
@@ -494,7 +363,7 @@ class Encoder(nn.Module):
         # fusion at (B, 512, 8, 8)
         image_embd_layer4 = self.avgpool(image_features)
         lidar_embd_layer4 = self.avgpool(lidar_features)
-        image_features_layer4, lidar_features_layer4 = self.transformer4(image_embd_layer4, lidar_embd_layer4, velocity)
+        image_features_layer4, lidar_features_layer4, attn_map4 = self.transformer4(image_embd_layer4, lidar_embd_layer4, velocity)
         image_features = image_features + image_features_layer4
         lidar_features = lidar_features + lidar_features_layer4
 
@@ -508,7 +377,9 @@ class Encoder(nn.Module):
         fused_features = torch.cat([image_features, lidar_features], dim=1)
         fused_features = torch.sum(fused_features, dim=1)
 
-        return fused_features
+        attn_map = torch.stack([attn_map1, attn_map2, attn_map3, attn_map4], dim=1)
+
+        return fused_features, attn_map
 
 
 class PIDController(object):
@@ -536,7 +407,7 @@ class PIDController(object):
         return self._K_P * error + self._K_I * integral + self._K_D * derivative
 
 
-class TransFuserEBiFusion(nn.Module):
+class TransFuser(nn.Module):
     '''
     Transformer-based feature fusion followed by GRU-based waypoint prediction network and PID controller
     '''
@@ -572,7 +443,7 @@ class TransFuserEBiFusion(nn.Module):
             target_point (tensor): goal location registered to ego-frame
             velocity (tensor): input velocity from speedometer
         '''
-        fused_features = self.encoder(image_list, lidar_list, velocity)
+        fused_features, attn_map = self.encoder(image_list, lidar_list, velocity)
         z = self.join(fused_features)
 
         output_wp = list()
@@ -591,7 +462,7 @@ class TransFuserEBiFusion(nn.Module):
 
         pred_wp = torch.stack(output_wp, dim=1)
 
-        return pred_wp
+        return pred_wp, attn_map
 
     def control_pid(self, waypoints, velocity):
         ''' 
@@ -636,26 +507,3 @@ class TransFuserEBiFusion(nn.Module):
         }
 
         return steer, throttle, brake, metadata
-
-# from config import GlobalConfig
-# config = GlobalConfig()
-# rgb = [torch.randn(1, 3, 256, 256)]
-# lidar = [torch.randn(1, 2, 256, 256)]
-# model = TransFuserEBiFusion(config, torch.device('cpu'))
-# y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
-# print(y.shape)
-
-# if __name__ == '__main__':
-#     from config import GlobalConfig
-#     from thop import profile
-#     config = GlobalConfig()
-#     rgb = [torch.randn(1, 3, 256, 256)]
-#     lidar = [torch.randn(1, 2, 256, 256)]
-#     model = TransFuserBiFusion(config, torch.device('cpu'))
-#     flops, params = profile(model, (rgb, lidar, torch.randn(1, 2), torch.randn(1)))
-#     print('flops: ', flops, 'params: ', params)
-#     print('flops: %.2f M, params: %.2f M' % (flops / 1000000.0, params / 1000000.0))
-#     print(model)
-
-
-

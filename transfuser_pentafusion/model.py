@@ -12,9 +12,9 @@ class ChannelPool(nn.Module):
         return torch.cat( (torch.max(x,1)[0].unsqueeze(1), torch.mean(x,1).unsqueeze(1)), dim=1)
 
 
-class EBiFusion_block(nn.Module):
+class PentaFusion_block(nn.Module):
     def __init__(self, ch_1, ch_2, r_1, r_2, ch_int, ch_out, drop_rate=0.):
-        super(EBiFusion_block, self).__init__()
+        super(PentaFusion_block, self).__init__()
 
         # channel attention for F_g, use SE Block
         self.rgb_fc1 = nn.Conv2d(ch_1, ch_1 // r_1, kernel_size=1)
@@ -22,11 +22,17 @@ class EBiFusion_block(nn.Module):
         self.rgb_fc2 = nn.Conv2d(ch_1 // r_1, ch_1, kernel_size=1)
         self.rgb_sigmoid = nn.Sigmoid()
 
+        self.rgb_compress = ChannelPool()
+        self.rgb_spatial = Conv(2, 1, 7, bn=True, relu=False, bias=False)
+
         # spatial attention for F_l
         self.lidar_fc1 = nn.Conv2d(ch_2, ch_2 // r_2, kernel_size=1)
         self.lidar_relu = nn.ReLU(inplace=True)
         self.lidar_fc2 = nn.Conv2d(ch_2 // r_2, ch_2, kernel_size=1)
         self.lidar_sigmoid = nn.Sigmoid()
+
+        self.lidar_compress = ChannelPool()
+        self.lidar_spatial = Conv(2, 1, 7, bn=True, relu=False, bias=False)
 
         # bi-linear modelling for both
         self.W_rgb = Conv(ch_1, ch_int, 1, bn=True, relu=False)
@@ -35,7 +41,7 @@ class EBiFusion_block(nn.Module):
 
         self.relu = nn.ReLU(inplace=True)
 
-        self.residual = Residual(ch_1+ch_2+ch_int, ch_out)
+        self.residual = Residual(ch_1+ch_2+ch_1+ch_2+ch_int, ch_out)
 
         self.dropout = nn.Dropout2d(drop_rate)
         self.drop_rate = drop_rate
@@ -47,6 +53,12 @@ class EBiFusion_block(nn.Module):
         W_lidar = self.W_lidar(lidar)
         bp = self.W(W_rgb*W_lidar)
 
+        rgb_pool_in = rgb
+        rgb_pool_out = rgb
+        rgb_pool_out = self.rgb_compress(rgb_pool_out)
+        rgb_pool_out = self.rgb_spatial(rgb_pool_out)
+        rgb_pool_out = self.rgb_sigmoid(rgb_pool_out) * rgb_pool_in
+
         # spatial attention for cnn branch
         rgb_in = rgb
         rgb = rgb.mean((2, 3), keepdim=True)
@@ -54,6 +66,12 @@ class EBiFusion_block(nn.Module):
         rgb = self.rgb_relu(rgb)
         rgb = self.rgb_fc2(rgb)
         rgb = self.rgb_sigmoid(rgb) * rgb_in
+
+        lidar_pool_in = rgb
+        lidar_pool_out = rgb
+        lidar_pool_out = self.lidar_compress(lidar_pool_out)
+        lidar_pool_out = self.lidar_spatial(lidar_pool_out)
+        lidar_pool_out = self.rgb_sigmoid(lidar_pool_out) * lidar_pool_in
 
         # channel attention for cnn branch
         lidar_in = lidar
@@ -64,7 +82,7 @@ class EBiFusion_block(nn.Module):
         lidar = self.lidar_sigmoid(lidar) * lidar_in
 
         # fusion
-        fuse = self.residual(torch.cat([rgb, lidar, bp], 1))
+        fuse = self.residual(torch.cat([rgb, lidar, rgb_pool_out, lidar_pool_out, bp], 1))
 
         if self.drop_rate > 0:
             return self.dropout(fuse)
@@ -263,7 +281,7 @@ class GPT(nn.Module):
         self.horz_anchors = horz_anchors
         self.config = config
 
-        self.ebifusion = EBiFusion_block(ch_1=n_embd, ch_2=n_embd, r_1=n_embd//64, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
+        self.bifusion = PentaFusion_block(ch_1=n_embd, ch_2=n_embd, r_1=n_embd//64, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
 
         # positional embedding parameter (learnable), image + lidar
         self.pos_emb = nn.Parameter(torch.zeros(1, seq_len * vert_anchors * horz_anchors, n_embd))
@@ -342,7 +360,7 @@ class GPT(nn.Module):
         image_tensor = image_tensor.view(bz, -1, h, w)
         lidar_tensor = lidar_tensor.view(bz, -1, h, w)
 
-        token_embeddings = self.ebifusion(image_tensor, lidar_tensor)
+        token_embeddings = self.bifusion(image_tensor, lidar_tensor)
         token_embeddings = token_embeddings.view(bz, -1, self.n_embd)
 
         # pad token embeddings along number of tokens dimension
@@ -536,7 +554,7 @@ class PIDController(object):
         return self._K_P * error + self._K_I * integral + self._K_D * derivative
 
 
-class TransFuserEBiFusion(nn.Module):
+class TransFuserPentaFusion(nn.Module):
     '''
     Transformer-based feature fusion followed by GRU-based waypoint prediction network and PID controller
     '''
@@ -641,7 +659,7 @@ class TransFuserEBiFusion(nn.Module):
 # config = GlobalConfig()
 # rgb = [torch.randn(1, 3, 256, 256)]
 # lidar = [torch.randn(1, 2, 256, 256)]
-# model = TransFuserEBiFusion(config, torch.device('cpu'))
+# model = TransFuserPentaBiFusion(config, torch.device('cpu'))
 # y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
 # print(y.shape)
 

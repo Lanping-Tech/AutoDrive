@@ -255,18 +255,19 @@ class GPT(nn.Module):
 
     def __init__(self, n_embd, n_head, block_exp, n_layer, 
                     vert_anchors, horz_anchors, seq_len, 
-                    embd_pdrop, attn_pdrop, resid_pdrop, config):
+                    embd_pdrop, attn_pdrop, resid_pdrop, config, factor):
         super().__init__()
         self.n_embd = n_embd
         self.seq_len = seq_len
         self.vert_anchors = vert_anchors
         self.horz_anchors = horz_anchors
         self.config = config
+        self.factor = factor
 
         self.ebifusion = EBiFusion_block(ch_1=n_embd, ch_2=n_embd, r_1=n_embd//64, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
 
         # positional embedding parameter (learnable), image + lidar
-        self.pos_emb = nn.Parameter(torch.zeros(1, seq_len * vert_anchors * horz_anchors, n_embd))
+        self.pos_emb = nn.Parameter(torch.zeros(1, seq_len * vert_anchors * horz_anchors *self.factor **2, n_embd))
         
         # velocity embedding
         self.vel_emb = nn.Linear(1, n_embd)
@@ -359,7 +360,7 @@ class GPT(nn.Module):
         # x = self.drop(token_embeddings + velocity_embeddings.unsqueeze(1)) # (B, an * T, C)
         x = self.blocks(x) # (B, an * T, C)
         x = self.ln_f(x) # (B, an * T, C)
-        x = x.view(bz, self.seq_len, self.vert_anchors, self.horz_anchors, self.n_embd)
+        x = x.view(bz, self.seq_len, self.vert_anchors*self.factor, self.horz_anchors*self.factor, self.n_embd)
         x = x.permute(0,1,4,2,3).contiguous() # same as token_embeddings
 
         fusion_tensor_out = x.view(bz * self.config.n_views * self.seq_len, -1, h, w)
@@ -392,7 +393,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=8)
         self.transformer2 = GPT(n_embd=128,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -403,7 +405,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=4)
         self.transformer3 = GPT(n_embd=256,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -414,7 +417,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=2)
         self.transformer4 = GPT(n_embd=512,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -425,7 +429,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=1)
 
         
     def forward(self, image_list, lidar_list, velocity):
@@ -459,41 +464,41 @@ class Encoder(nn.Module):
         image_features = self.image_encoder.features.layer1(image_features)
         lidar_features = self.lidar_encoder._model.layer1(lidar_features)
         # fusion at (B, 64, 64, 64)
-        image_embd_layer1 = self.avgpool(image_features)
-        lidar_embd_layer1 = self.avgpool(lidar_features)
+        image_embd_layer1 = image_features
+        lidar_embd_layer1 = lidar_features
         image_features_layer1, lidar_features_layer1 = self.transformer1(image_embd_layer1, lidar_embd_layer1, velocity)
-        image_features_layer1 = F.interpolate(image_features_layer1, scale_factor=8, mode='bilinear')
-        lidar_features_layer1 = F.interpolate(lidar_features_layer1, scale_factor=8, mode='bilinear')
+        # image_features_layer1 = F.interpolate(image_features_layer1, scale_factor=8, mode='bilinear')
+        # lidar_features_layer1 = F.interpolate(lidar_features_layer1, scale_factor=8, mode='bilinear')
         image_features = image_features + image_features_layer1
         lidar_features = lidar_features + lidar_features_layer1
 
         image_features = self.image_encoder.features.layer2(image_features)
         lidar_features = self.lidar_encoder._model.layer2(lidar_features)
         # fusion at (B, 128, 32, 32)
-        image_embd_layer2 = self.avgpool(image_features)
-        lidar_embd_layer2 = self.avgpool(lidar_features)
+        image_embd_layer2 = image_features
+        lidar_embd_layer2 = lidar_features
         image_features_layer2, lidar_features_layer2 = self.transformer2(image_embd_layer2, lidar_embd_layer2, velocity)
-        image_features_layer2 = F.interpolate(image_features_layer2, scale_factor=4, mode='bilinear')
-        lidar_features_layer2 = F.interpolate(lidar_features_layer2, scale_factor=4, mode='bilinear')
+        # image_features_layer2 = F.interpolate(image_features_layer2, scale_factor=4, mode='bilinear')
+        # lidar_features_layer2 = F.interpolate(lidar_features_layer2, scale_factor=4, mode='bilinear')
         image_features = image_features + image_features_layer2
         lidar_features = lidar_features + lidar_features_layer2
 
         image_features = self.image_encoder.features.layer3(image_features)
         lidar_features = self.lidar_encoder._model.layer3(lidar_features)
         # fusion at (B, 256, 16, 16)
-        image_embd_layer3 = self.avgpool(image_features)
-        lidar_embd_layer3 = self.avgpool(lidar_features)
+        image_embd_layer3 = image_features
+        lidar_embd_layer3 = lidar_features
         image_features_layer3, lidar_features_layer3 = self.transformer3(image_embd_layer3, lidar_embd_layer3, velocity)
-        image_features_layer3 = F.interpolate(image_features_layer3, scale_factor=2, mode='bilinear')
-        lidar_features_layer3 = F.interpolate(lidar_features_layer3, scale_factor=2, mode='bilinear')
+        # image_features_layer3 = F.interpolate(image_features_layer3, scale_factor=2, mode='bilinear')
+        # lidar_features_layer3 = F.interpolate(lidar_features_layer3, scale_factor=2, mode='bilinear')
         image_features = image_features + image_features_layer3
         lidar_features = lidar_features + lidar_features_layer3
 
         image_features = self.image_encoder.features.layer4(image_features)
         lidar_features = self.lidar_encoder._model.layer4(lidar_features)
         # fusion at (B, 512, 8, 8)
-        image_embd_layer4 = self.avgpool(image_features)
-        lidar_embd_layer4 = self.avgpool(lidar_features)
+        image_embd_layer4 = image_features
+        lidar_embd_layer4 = lidar_features
         image_features_layer4, lidar_features_layer4 = self.transformer4(image_embd_layer4, lidar_embd_layer4, velocity)
         image_features = image_features + image_features_layer4
         lidar_features = lidar_features + lidar_features_layer4
@@ -536,7 +541,7 @@ class PIDController(object):
         return self._K_P * error + self._K_I * integral + self._K_D * derivative
 
 
-class TransFuserEBiFusion(nn.Module):
+class TransFuserEBiFusionNoPool(nn.Module):
     '''
     Transformer-based feature fusion followed by GRU-based waypoint prediction network and PID controller
     '''
@@ -641,7 +646,7 @@ class TransFuserEBiFusion(nn.Module):
 # config = GlobalConfig()
 # rgb = [torch.randn(1, 3, 256, 256)]
 # lidar = [torch.randn(1, 2, 256, 256)]
-# model = TransFuserEBiFusion(config, torch.device('cpu'))
+# model = TransFuserEBiFusionNoPool(config, torch.device('cpu'))
 # y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
 # print(y.shape)
 

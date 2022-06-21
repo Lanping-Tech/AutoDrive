@@ -12,25 +12,23 @@ class ChannelPool(nn.Module):
         return torch.cat( (torch.max(x,1)[0].unsqueeze(1), torch.mean(x,1).unsqueeze(1)), dim=1)
 
 
-class EBiFusion_block(nn.Module):
-    def __init__(self, ch_1, ch_2, r_1, r_2, ch_int, ch_out, drop_rate=0.):
-        super(EBiFusion_block, self).__init__()
+class BiFusion_block(nn.Module):
+    def __init__(self, ch_1, ch_2, r_2, ch_int, ch_out, drop_rate=0.):
+        super(BiFusion_block, self).__init__()
 
         # channel attention for F_g, use SE Block
-        self.rgb_fc1 = nn.Conv2d(ch_1, ch_1 // r_1, kernel_size=1)
-        self.rgb_relu = nn.ReLU(inplace=True)
-        self.rgb_fc2 = nn.Conv2d(ch_1 // r_1, ch_1, kernel_size=1)
-        self.rgb_sigmoid = nn.Sigmoid()
+        self.fc1 = nn.Conv2d(ch_2, ch_2 // r_2, kernel_size=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv2d(ch_2 // r_2, ch_2, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
 
         # spatial attention for F_l
-        self.lidar_fc1 = nn.Conv2d(ch_2, ch_2 // r_2, kernel_size=1)
-        self.lidar_relu = nn.ReLU(inplace=True)
-        self.lidar_fc2 = nn.Conv2d(ch_2 // r_2, ch_2, kernel_size=1)
-        self.lidar_sigmoid = nn.Sigmoid()
+        self.compress = ChannelPool()
+        self.spatial = Conv(2, 1, 7, bn=True, relu=False, bias=False)
 
         # bi-linear modelling for both
-        self.W_rgb = Conv(ch_1, ch_int, 1, bn=True, relu=False)
-        self.W_lidar = Conv(ch_2, ch_int, 1, bn=True, relu=False)
+        self.W_g = Conv(ch_1, ch_int, 1, bn=True, relu=False)
+        self.W_x = Conv(ch_2, ch_int, 1, bn=True, relu=False)
         self.W = Conv(ch_int, ch_int, 3, bn=True, relu=True)
 
         self.relu = nn.ReLU(inplace=True)
@@ -41,30 +39,26 @@ class EBiFusion_block(nn.Module):
         self.drop_rate = drop_rate
 
         
-    def forward(self, rgb, lidar):
+    def forward(self, g, x):
         # bilinear pooling
-        W_rgb = self.W_rgb(rgb)
-        W_lidar = self.W_lidar(lidar)
-        bp = self.W(W_rgb*W_lidar)
+        W_g = self.W_g(g)
+        W_x = self.W_x(x)
+        bp = self.W(W_g*W_x)
 
         # spatial attention for cnn branch
-        rgb_in = rgb
-        rgb = rgb.mean((2, 3), keepdim=True)
-        rgb = self.rgb_fc1(rgb)
-        rgb = self.rgb_relu(rgb)
-        rgb = self.rgb_fc2(rgb)
-        rgb = self.rgb_sigmoid(rgb) * rgb_in
+        g_in = g
+        g = self.compress(g)
+        g = self.spatial(g)
+        g = self.sigmoid(g) * g_in
 
-        # channel attention for cnn branch
-        lidar_in = lidar
-        lidar = lidar.mean((2, 3), keepdim=True)
-        lidar = self.lidar_fc1(lidar)
-        lidar = self.lidar_relu(lidar)
-        lidar = self.lidar_fc2(lidar)
-        lidar = self.lidar_sigmoid(lidar) * lidar_in
-
-        # fusion
-        fuse = self.residual(torch.cat([rgb, lidar, bp], 1))
+        # channel attetion for transformer branch
+        x_in = x
+        x = x.mean((2, 3), keepdim=True)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.sigmoid(x) * x_in
+        fuse = self.residual(torch.cat([g, x, bp], 1))
 
         if self.drop_rate > 0:
             return self.dropout(fuse)
@@ -255,18 +249,19 @@ class GPT(nn.Module):
 
     def __init__(self, n_embd, n_head, block_exp, n_layer, 
                     vert_anchors, horz_anchors, seq_len, 
-                    embd_pdrop, attn_pdrop, resid_pdrop, config):
+                    embd_pdrop, attn_pdrop, resid_pdrop, config, factor):
         super().__init__()
         self.n_embd = n_embd
         self.seq_len = seq_len
         self.vert_anchors = vert_anchors
         self.horz_anchors = horz_anchors
         self.config = config
+        self.factor = factor
 
-        self.ebifusion = EBiFusion_block(ch_1=n_embd, ch_2=n_embd, r_1=n_embd//64, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
+        self.bifusion = BiFusion_block(ch_1=n_embd, ch_2=n_embd, r_2=n_embd//64, ch_int=n_embd, ch_out=n_embd, drop_rate=embd_pdrop/2)
 
         # positional embedding parameter (learnable), image + lidar
-        self.pos_emb = nn.Parameter(torch.zeros(1, seq_len * vert_anchors * horz_anchors, n_embd))
+        self.pos_emb = nn.Parameter(torch.zeros(1, seq_len * vert_anchors * horz_anchors * factor**2, n_embd))
         
         # velocity embedding
         self.vel_emb = nn.Linear(1, n_embd)
@@ -342,7 +337,7 @@ class GPT(nn.Module):
         image_tensor = image_tensor.view(bz, -1, h, w)
         lidar_tensor = lidar_tensor.view(bz, -1, h, w)
 
-        token_embeddings = self.ebifusion(image_tensor, lidar_tensor)
+        token_embeddings = self.bifusion(lidar_tensor, image_tensor)
         token_embeddings = token_embeddings.view(bz, -1, self.n_embd)
 
         # pad token embeddings along number of tokens dimension
@@ -359,7 +354,7 @@ class GPT(nn.Module):
         # x = self.drop(token_embeddings + velocity_embeddings.unsqueeze(1)) # (B, an * T, C)
         x = self.blocks(x) # (B, an * T, C)
         x = self.ln_f(x) # (B, an * T, C)
-        x = x.view(bz, self.seq_len, self.vert_anchors, self.horz_anchors, self.n_embd)
+        x = x.view(bz, self.seq_len, self.vert_anchors * self.factor, self.horz_anchors* self.factor, self.n_embd)
         x = x.permute(0,1,4,2,3).contiguous() # same as token_embeddings
 
         fusion_tensor_out = x.view(bz * self.config.n_views * self.seq_len, -1, h, w)
@@ -392,7 +387,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=8)
         self.transformer2 = GPT(n_embd=128,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -403,7 +399,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=4)
         self.transformer3 = GPT(n_embd=256,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -414,7 +411,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=2)
         self.transformer4 = GPT(n_embd=512,
                             n_head=config.n_head, 
                             block_exp=config.block_exp, 
@@ -425,7 +423,8 @@ class Encoder(nn.Module):
                             embd_pdrop=config.embd_pdrop, 
                             attn_pdrop=config.attn_pdrop, 
                             resid_pdrop=config.resid_pdrop,
-                            config=config)
+                            config=config,
+                            factor=1)
 
         
     def forward(self, image_list, lidar_list, velocity):
@@ -459,41 +458,41 @@ class Encoder(nn.Module):
         image_features = self.image_encoder.features.layer1(image_features)
         lidar_features = self.lidar_encoder._model.layer1(lidar_features)
         # fusion at (B, 64, 64, 64)
-        image_embd_layer1 = self.avgpool(image_features)
-        lidar_embd_layer1 = self.avgpool(lidar_features)
+        image_embd_layer1 = image_features
+        lidar_embd_layer1 = lidar_features
         image_features_layer1, lidar_features_layer1 = self.transformer1(image_embd_layer1, lidar_embd_layer1, velocity)
-        image_features_layer1 = F.interpolate(image_features_layer1, scale_factor=8, mode='bilinear')
-        lidar_features_layer1 = F.interpolate(lidar_features_layer1, scale_factor=8, mode='bilinear')
+        # image_features_layer1 = F.interpolate(image_features_layer1, scale_factor=8, mode='bilinear')
+        # lidar_features_layer1 = F.interpolate(lidar_features_layer1, scale_factor=8, mode='bilinear')
         image_features = image_features + image_features_layer1
         lidar_features = lidar_features + lidar_features_layer1
 
         image_features = self.image_encoder.features.layer2(image_features)
         lidar_features = self.lidar_encoder._model.layer2(lidar_features)
         # fusion at (B, 128, 32, 32)
-        image_embd_layer2 = self.avgpool(image_features)
-        lidar_embd_layer2 = self.avgpool(lidar_features)
+        image_embd_layer2 = image_features
+        lidar_embd_layer2 = lidar_features
         image_features_layer2, lidar_features_layer2 = self.transformer2(image_embd_layer2, lidar_embd_layer2, velocity)
-        image_features_layer2 = F.interpolate(image_features_layer2, scale_factor=4, mode='bilinear')
-        lidar_features_layer2 = F.interpolate(lidar_features_layer2, scale_factor=4, mode='bilinear')
+        # image_features_layer2 = F.interpolate(image_features_layer2, scale_factor=4, mode='bilinear')
+        # lidar_features_layer2 = F.interpolate(lidar_features_layer2, scale_factor=4, mode='bilinear')
         image_features = image_features + image_features_layer2
         lidar_features = lidar_features + lidar_features_layer2
 
         image_features = self.image_encoder.features.layer3(image_features)
         lidar_features = self.lidar_encoder._model.layer3(lidar_features)
         # fusion at (B, 256, 16, 16)
-        image_embd_layer3 = self.avgpool(image_features)
-        lidar_embd_layer3 = self.avgpool(lidar_features)
+        image_embd_layer3 = image_features
+        lidar_embd_layer3 = lidar_features
         image_features_layer3, lidar_features_layer3 = self.transformer3(image_embd_layer3, lidar_embd_layer3, velocity)
-        image_features_layer3 = F.interpolate(image_features_layer3, scale_factor=2, mode='bilinear')
-        lidar_features_layer3 = F.interpolate(lidar_features_layer3, scale_factor=2, mode='bilinear')
+        # image_features_layer3 = F.interpolate(image_features_layer3, scale_factor=2, mode='bilinear')
+        # lidar_features_layer3 = F.interpolate(lidar_features_layer3, scale_factor=2, mode='bilinear')
         image_features = image_features + image_features_layer3
         lidar_features = lidar_features + lidar_features_layer3
 
         image_features = self.image_encoder.features.layer4(image_features)
         lidar_features = self.lidar_encoder._model.layer4(lidar_features)
         # fusion at (B, 512, 8, 8)
-        image_embd_layer4 = self.avgpool(image_features)
-        lidar_embd_layer4 = self.avgpool(lidar_features)
+        image_embd_layer4 = image_features
+        lidar_embd_layer4 = lidar_features
         image_features_layer4, lidar_features_layer4 = self.transformer4(image_embd_layer4, lidar_embd_layer4, velocity)
         image_features = image_features + image_features_layer4
         lidar_features = lidar_features + lidar_features_layer4
@@ -536,7 +535,7 @@ class PIDController(object):
         return self._K_P * error + self._K_I * integral + self._K_D * derivative
 
 
-class TransFuserEBiFusion(nn.Module):
+class TransFuserBiFusionNoPool(nn.Module):
     '''
     Transformer-based feature fusion followed by GRU-based waypoint prediction network and PID controller
     '''
@@ -641,7 +640,7 @@ class TransFuserEBiFusion(nn.Module):
 # config = GlobalConfig()
 # rgb = [torch.randn(1, 3, 256, 256)]
 # lidar = [torch.randn(1, 2, 256, 256)]
-# model = TransFuserEBiFusion(config, torch.device('cpu'))
+# model = TransFuserBiFusionNoPool(config, torch.device('cpu'))
 # y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
 # print(y.shape)
 
