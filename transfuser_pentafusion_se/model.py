@@ -748,13 +748,13 @@ class TransFuserPentaFusionSE(nn.Module):
 
         return steer, throttle, brake, metadata
 
-from config import GlobalConfig
-config = GlobalConfig()
-rgb = [torch.randn(1, 3, 256, 256)]
-lidar = [torch.randn(1, 2, 256, 256)]
-model = TransFuserPentaFusionSE(config, torch.device('cpu'))
-y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
-print(y.shape)
+# from config import GlobalConfig
+# config = GlobalConfig()
+# rgb = [torch.randn(1, 3, 256, 256)]
+# lidar = [torch.randn(1, 2, 256, 256)]
+# model = TransFuserPentaFusionSE(config, torch.device('cpu'))
+# y = model(rgb, lidar, torch.randn(1, 2), torch.randn(1))
+# print(y.shape)
 
 # if __name__ == '__main__':
 #     from config import GlobalConfig
